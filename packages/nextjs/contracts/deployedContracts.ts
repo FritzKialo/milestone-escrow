@@ -27,6 +27,16 @@ const deployedContracts = {
         },
         {
           inputs: [],
+          name: "ArbiterTimeoutNotReached",
+          type: "error",
+        },
+        {
+          inputs: [],
+          name: "ArbiterTimeoutPassed",
+          type: "error",
+        },
+        {
+          inputs: [],
           name: "DeadlineNotPassed",
           type: "error",
         },
@@ -188,6 +198,25 @@ const deployedContracts = {
               type: "uint256",
             },
             {
+              indexed: false,
+              internalType: "uint256",
+              name: "refunded",
+              type: "uint256",
+            },
+          ],
+          name: "AgreementDeclined",
+          type: "event",
+        },
+        {
+          anonymous: false,
+          inputs: [
+            {
+              indexed: true,
+              internalType: "uint256",
+              name: "id",
+              type: "uint256",
+            },
+            {
               indexed: true,
               internalType: "uint256",
               name: "index",
@@ -207,6 +236,25 @@ const deployedContracts = {
             },
           ],
           name: "DisputeResolved",
+          type: "event",
+        },
+        {
+          anonymous: false,
+          inputs: [
+            {
+              indexed: true,
+              internalType: "uint256",
+              name: "id",
+              type: "uint256",
+            },
+            {
+              indexed: true,
+              internalType: "uint256",
+              name: "index",
+              type: "uint256",
+            },
+          ],
+          name: "DisputeTimedOut",
           type: "event",
         },
         {
@@ -314,6 +362,19 @@ const deployedContracts = {
           ],
           name: "MilestoneSubmitted",
           type: "event",
+        },
+        {
+          inputs: [],
+          name: "ARBITER_TIMEOUT",
+          outputs: [
+            {
+              internalType: "uint64",
+              name: "",
+              type: "uint64",
+            },
+          ],
+          stateMutability: "view",
+          type: "function",
         },
         {
           inputs: [],
@@ -485,6 +546,19 @@ const deployedContracts = {
               name: "id",
               type: "uint256",
             },
+          ],
+          name: "declineAgreement",
+          outputs: [],
+          stateMutability: "nonpayable",
+          type: "function",
+        },
+        {
+          inputs: [
+            {
+              internalType: "uint256",
+              name: "id",
+              type: "uint256",
+            },
             {
               internalType: "uint256",
               name: "index",
@@ -595,6 +669,11 @@ const deployedContracts = {
                   type: "uint64",
                 },
                 {
+                  internalType: "uint64",
+                  name: "disputedAt",
+                  type: "uint64",
+                },
+                {
                   internalType: "enum MilestoneEscrow.MilestoneStatus",
                   name: "status",
                   type: "uint8",
@@ -645,6 +724,24 @@ const deployedContracts = {
             },
           ],
           name: "resolveDispute",
+          outputs: [],
+          stateMutability: "nonpayable",
+          type: "function",
+        },
+        {
+          inputs: [
+            {
+              internalType: "uint256",
+              name: "id",
+              type: "uint256",
+            },
+            {
+              internalType: "uint256",
+              name: "index",
+              type: "uint256",
+            },
+          ],
+          name: "resolveDisputeAfterTimeout",
           outputs: [],
           stateMutability: "nonpayable",
           type: "function",

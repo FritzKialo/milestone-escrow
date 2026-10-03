@@ -1,7 +1,9 @@
 // First block to search for events. Use 0n locally.
-// Before Sepolia, set this to the block your MilestoneEscrow was deployed in,
-// otherwise the event search scans the whole chain and public RPCs will refuse it.
+// Before Sepolia, set this to the block your MilestoneEscrow was deployed in.
 export const FROM_BLOCK = 0n;
+
+// Must match ARBITER_TIMEOUT in MilestoneEscrow.sol (7 days)
+export const ARBITER_TIMEOUT = 7 * 24 * 60 * 60;
 
 export const AGREEMENT_STATUS = ["Created", "Active", "Cancelled", "Completed"];
 export const MILESTONE_STATUS = ["Pending", "Submitted", "Disputed", "Released", "Refunded", "Resolved"];
@@ -35,6 +37,10 @@ export const isSafeUrl = (value: string) => {
   }
 };
 
+// Etherscan link for a transaction, only on Sepolia
+export const explorerTxUrl = (chainId: number, hash?: string | null) =>
+  hash && chainId === 11155111 ? `https://sepolia.etherscan.io/tx/${hash}` : null;
+
 // Contract custom error name -> plain-language message
 const ERROR_MESSAGES: Record<string, string> = {
   NotClient: "Only the client of this agreement can do that.",
@@ -49,6 +55,8 @@ const ERROR_MESSAGES: Record<string, string> = {
   ReviewPeriodNotOver: "The review period is still running, so the payment cannot be claimed yet.",
   DeadlineNotPassed: "The deadline for this milestone has not passed yet.",
   AmountExceedsMilestone: "The freelancer's share cannot be more than the milestone amount.",
+  ArbiterTimeoutNotReached: "The arbiter still has time to respond, so the 50/50 split is not available yet.",
+  ArbiterTimeoutPassed: "The arbiter's 7 days are over. Anyone can now split this milestone 50/50.",
   ERC20InsufficientAllowance: "The escrow is not yet allowed to move your mUSDC. Approve it first.",
   ERC20InsufficientBalance: "You do not have enough mUSDC.",
 };
@@ -72,4 +80,46 @@ export const friendlyError = (e: unknown): string => {
     return "Your wallet does not have enough ETH to pay for gas.";
   }
   return "The transaction failed. Check the browser console for details.";
+};
+
+type MilestoneLike = { status: number; deadline: bigint; submittedAt: bigint; disputedAt: bigint };
+type AgreementLike = { client: string; freelancer: string; arbiter: string; reviewPeriod: bigint; status: number };
+
+// What the connected wallet can do right now on an agreement, as short labels
+export const pendingActions = (
+  a: AgreementLike,
+  ms: readonly MilestoneLike[],
+  me: string | undefined,
+  now: number,
+): string[] => {
+  const addr = (me ?? "").toLowerCase();
+  if (!addr || now === 0) return [];
+  const isC = a.client.toLowerCase() === addr;
+  const isF = a.freelancer.toLowerCase() === addr;
+  const isA = a.arbiter.toLowerCase() === addr;
+  const out: string[] = [];
+
+  if (Number(a.status) === 0) {
+    if (isF) out.push("Accept or decline");
+    return out;
+  }
+  if (Number(a.status) !== 1) return out;
+
+  const review = Number(a.reviewPeriod);
+  ms.forEach((m, i) => {
+    const n = i + 1;
+    const st = Number(m.status);
+    if (st === 0) {
+      if (isF) out.push(`Submit milestone ${n}`);
+      if (isC && now > Number(m.deadline)) out.push(`Refund milestone ${n}`);
+    } else if (st === 1) {
+      if (isC) out.push(`Review milestone ${n}`);
+      if (isF && now > Number(m.submittedAt) + review) out.push(`Claim milestone ${n}`);
+    } else if (st === 2) {
+      const timedOut = now > Number(m.disputedAt) + ARBITER_TIMEOUT;
+      if (isA && !timedOut) out.push(`Resolve milestone ${n}`);
+      if (timedOut && (isC || isF || isA)) out.push(`Split milestone ${n} 50/50`);
+    }
+  });
+  return out;
 };

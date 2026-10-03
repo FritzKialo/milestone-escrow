@@ -8,7 +8,8 @@ import type { NextPage } from "next";
 import { formatUnits } from "viem";
 import { useAccount } from "wagmi";
 import { useScaffoldEventHistory, useScaffoldReadContract } from "~~/hooks/scaffold-eth";
-import { AGREEMENT_STATUS, FROM_BLOCK } from "~~/utils/escrow";
+import { useChainNow } from "~~/hooks/useChainNow";
+import { AGREEMENT_STATUS, FROM_BLOCK, pendingActions } from "~~/utils/escrow";
 
 type Tab = "client" | "freelancer" | "arbiter";
 
@@ -18,24 +19,52 @@ const AgreementRow = ({
   freelancer,
   arbiter,
   total,
+  me,
+  now,
 }: {
   id: bigint;
   client: string;
   freelancer: string;
   arbiter: string;
   total: bigint;
+  me: string | undefined;
+  now: number;
 }) => {
   const { data: agreement } = useScaffoldReadContract({
     contractName: "MilestoneEscrow",
     functionName: "getAgreement",
     args: [id],
   });
+  const { data: milestones } = useScaffoldReadContract({
+    contractName: "MilestoneEscrow",
+    functionName: "getMilestones",
+    args: [id],
+  });
+
+  const actions = agreement && milestones ? pendingActions(agreement, milestones, me, now) : [];
+  const settled = agreement ? Number(agreement.settledCount) : 0;
+  const count = milestones ? milestones.length : 0;
 
   return (
     <tr>
       <td>#{id.toString()}</td>
-      <td>{agreement?.title ?? "..."}</td>
+      <td>
+        <div className="flex flex-col gap-1">
+          <span>{agreement?.title ?? "..."}</span>
+          {actions.length > 0 && (
+            <span className="badge badge-warning" title={actions.join(", ")}>
+              Needs your action ({actions.length})
+            </span>
+          )}
+        </div>
+      </td>
       <td>{agreement ? AGREEMENT_STATUS[Number(agreement.status)] : "..."}</td>
+      <td className="min-w-36">
+        <progress className="progress progress-primary w-full" value={settled} max={count || 1}></progress>
+        <span className="text-xs opacity-70">
+          {settled} of {count} settled
+        </span>
+      </td>
       <td>{formatUnits(total, 6)} mUSDC</td>
       <td>
         <div className="flex flex-col gap-1">
@@ -55,6 +84,7 @@ const AgreementRow = ({
 
 const Agreements: NextPage = () => {
   const { address } = useAccount();
+  const now = useChainNow();
   const [tab, setTab] = useState<Tab>("client");
   const me = address as `0x${string}`;
 
@@ -88,7 +118,7 @@ const Agreements: NextPage = () => {
 
   return (
     <div className="flex items-center flex-col grow pt-10 pb-10">
-      <div className="px-5 w-full max-w-5xl">
+      <div className="px-5 w-full max-w-6xl">
         <h1 className="text-center text-4xl font-bold mb-6">My agreements</h1>
 
         {!address ? (
@@ -117,6 +147,7 @@ const Agreements: NextPage = () => {
                       <th className="bg-primary">ID</th>
                       <th className="bg-primary">Title</th>
                       <th className="bg-primary">Status</th>
+                      <th className="bg-primary">Progress</th>
                       <th className="bg-primary">Total</th>
                       <th className="bg-primary">Client / Freelancer / Arbiter</th>
                       <th className="bg-primary"></th>
@@ -131,6 +162,8 @@ const Agreements: NextPage = () => {
                         freelancer={e.args.freelancer as string}
                         arbiter={e.args.arbiter as string}
                         total={e.args.totalAmount as bigint}
+                        me={address}
+                        now={now}
                       />
                     ))}
                   </tbody>

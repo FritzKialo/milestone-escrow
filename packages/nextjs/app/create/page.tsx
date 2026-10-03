@@ -5,7 +5,13 @@ import { AddressInput } from "@scaffold-ui/components";
 import type { NextPage } from "next";
 import { formatUnits, isAddress, parseUnits } from "viem";
 import { useAccount } from "wagmi";
-import { useDeployedContractInfo, useScaffoldReadContract, useScaffoldWriteContract } from "~~/hooks/scaffold-eth";
+import {
+  useDeployedContractInfo,
+  useScaffoldReadContract,
+  useScaffoldWriteContract,
+  useTargetNetwork,
+} from "~~/hooks/scaffold-eth";
+import { explorerTxUrl } from "~~/utils/escrow";
 import { notification } from "~~/utils/scaffold-eth";
 
 const MAX_MILESTONES = 20;
@@ -13,6 +19,13 @@ const MAX_MILESTONES = 20;
 type Row = { description: string; amount: string; days: string };
 
 const emptyRow = (): Row => ({ description: "", amount: "", days: "7" });
+
+const TEMPLATES: { name: string; split: number[] }[] = [
+  { name: "Single payment", split: [100] },
+  { name: "50 / 50", split: [50, 50] },
+  { name: "30 / 40 / 30", split: [30, 40, 30] },
+  { name: "4 x 25", split: [25, 25, 25, 25] },
+];
 
 // Parse a decimal string into 6-decimal token units, or 0n if it is not a valid number
 const toUnits = (value: string): bigint => {
@@ -25,12 +38,14 @@ const toUnits = (value: string): bigint => {
 
 const Create: NextPage = () => {
   const { address: connectedAddress } = useAccount();
+  const { targetNetwork } = useTargetNetwork();
 
   const [title, setTitle] = useState("");
   const [freelancer, setFreelancer] = useState("");
   const [arbiter, setArbiter] = useState("");
   const [reviewHours, setReviewHours] = useState("48");
   const [rows, setRows] = useState<Row[]>([emptyRow()]);
+  const [templateTotal, setTemplateTotal] = useState("300");
   const [busy, setBusy] = useState<"" | "approve" | "create">("");
 
   const { data: escrowInfo } = useDeployedContractInfo({ contractName: "MilestoneEscrow" });
@@ -76,6 +91,22 @@ const Create: NextPage = () => {
   const updateRow = (i: number, patch: Partial<Row>) =>
     setRows(rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
 
+  const applyTemplate = (split: number[]) => {
+    const all = toUnits(templateTotal);
+    if (all === 0n) {
+      notification.error("Enter a template total above zero first.");
+      return;
+    }
+    let used = 0n;
+    setRows(
+      split.map((pct, i) => {
+        const amount = i === split.length - 1 ? all - used : (all * BigInt(pct)) / 100n;
+        used += amount;
+        return { description: `Milestone ${i + 1}`, amount: formatUnits(amount, 6), days: String(7 * (i + 1)) };
+      }),
+    );
+  };
+
   const handleApprove = async () => {
     if (!escrowAddress) return;
     setBusy("approve");
@@ -93,7 +124,7 @@ const Create: NextPage = () => {
     setBusy("create");
     try {
       const now = Math.floor(Date.now() / 1000);
-      await writeEscrow({
+      const hash = await writeEscrow({
         functionName: "createAgreement",
         args: [
           freelancer as `0x${string}`,
@@ -106,7 +137,19 @@ const Create: NextPage = () => {
         ],
       });
       await refetchAllowance();
-      notification.success("Agreement created and funded. Find it under My agreements.");
+      const url = explorerTxUrl(targetNetwork.id, hash);
+      notification.success(
+        url ? (
+          <span>
+            Agreement created and funded.{" "}
+            <a href={url} target="_blank" rel="noopener noreferrer" className="link">
+              View on Etherscan
+            </a>
+          </span>
+        ) : (
+          "Agreement created and funded. Find it under My agreements."
+        ),
+      );
       setTitle("");
       setFreelancer("");
       setArbiter("");
@@ -160,6 +203,29 @@ const Create: NextPage = () => {
           </label>
 
           <h2 className="text-xl font-bold mt-2 mb-0">Milestones</h2>
+
+          <div className="flex flex-wrap items-end gap-2 border border-base-300 p-3">
+            <label className="flex flex-col gap-1">
+              <span className="text-sm">Quick split of a total (mUSDC)</span>
+              <input
+                className="input input-bordered input-sm w-32"
+                inputMode="decimal"
+                value={templateTotal}
+                onChange={e => setTemplateTotal(e.target.value)}
+              />
+            </label>
+            {TEMPLATES.map(t => (
+              <button
+                key={t.name}
+                type="button"
+                className="btn btn-sm btn-outline"
+                onClick={() => applyTemplate(t.split)}
+              >
+                {t.name}
+              </button>
+            ))}
+          </div>
+
           {rows.map((r, i) => (
             <div key={i} className="grid grid-cols-12 gap-2 items-end">
               <label className="col-span-12 md:col-span-5 flex flex-col gap-1">

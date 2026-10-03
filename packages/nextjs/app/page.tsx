@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-deprecated */
 "use client";
 
 import { useState } from "react";
@@ -6,7 +7,14 @@ import { Address } from "@scaffold-ui/components";
 import type { NextPage } from "next";
 import { formatUnits, parseUnits } from "viem";
 import { useAccount } from "wagmi";
-import { useScaffoldReadContract, useScaffoldWriteContract, useTargetNetwork } from "~~/hooks/scaffold-eth";
+import {
+  useDeployedContractInfo,
+  useScaffoldEventHistory,
+  useScaffoldReadContract,
+  useScaffoldWriteContract,
+  useTargetNetwork,
+} from "~~/hooks/scaffold-eth";
+import { FROM_BLOCK } from "~~/utils/escrow";
 import { notification } from "~~/utils/scaffold-eth";
 
 const roles = [
@@ -16,11 +24,11 @@ const roles = [
   },
   {
     name: "Freelancer",
-    text: "Accepts the terms, submits each milestone and gets paid on approval or after the review period.",
+    text: "Accepts or declines the terms, submits each milestone and gets paid on approval or after the review period.",
   },
   {
     name: "Arbiter",
-    text: "Named by the client and confirmed when the freelancer accepts. Splits a disputed milestone fairly.",
+    text: "Named by the client and confirmed when the freelancer accepts. Splits a disputed milestone, or after 7 days anyone can split it 50/50.",
   },
 ];
 
@@ -28,12 +36,36 @@ const Home: NextPage = () => {
   const { address: connectedAddress } = useAccount();
   const { targetNetwork } = useTargetNetwork();
   const [minting, setMinting] = useState(false);
+  const me = connectedAddress as `0x${string}`;
 
   const { data: balance, refetch } = useScaffoldReadContract({
     contractName: "MockUSDC",
     functionName: "balanceOf",
     args: [connectedAddress],
   });
+
+  const { data: escrowInfo } = useDeployedContractInfo({ contractName: "MilestoneEscrow" });
+  const { data: agreementCount } = useScaffoldReadContract({
+    contractName: "MilestoneEscrow",
+    functionName: "agreementCount",
+  });
+  const { data: locked } = useScaffoldReadContract({
+    contractName: "MockUSDC",
+    functionName: "balanceOf",
+    args: [escrowInfo?.address],
+  });
+
+  const base = {
+    contractName: "MilestoneEscrow" as const,
+    eventName: "AgreementCreated" as const,
+    fromBlock: FROM_BLOCK,
+  };
+  const asClient = useScaffoldEventHistory({ ...base, filters: { client: me }, enabled: !!connectedAddress });
+  const asFreelancer = useScaffoldEventHistory({ ...base, filters: { freelancer: me }, enabled: !!connectedAddress });
+  const asArbiter = useScaffoldEventHistory({ ...base, filters: { arbiter: me }, enabled: !!connectedAddress });
+
+  const myIds = new Set<string>();
+  [asClient.data, asFreelancer.data, asArbiter.data].forEach(list => list?.forEach(e => myIds.add(String(e.args.id))));
 
   const { writeContractAsync } = useScaffoldWriteContract({ contractName: "MockUSDC" });
 
@@ -79,6 +111,21 @@ const Home: NextPage = () => {
       </div>
 
       <div className="grow bg-base-300 w-full mt-12 px-8 py-12">
+        <div className="flex justify-center gap-6 flex-wrap mb-12">
+          <div className="bg-base-100 border border-base-300 px-8 py-4 text-center">
+            <div className="text-3xl font-bold">{agreementCount !== undefined ? agreementCount.toString() : "..."}</div>
+            <div className="text-sm opacity-70">Agreements created</div>
+          </div>
+          <div className="bg-base-100 border border-base-300 px-8 py-4 text-center">
+            <div className="text-3xl font-bold">{locked !== undefined ? formatUnits(locked, 6) : "..."}</div>
+            <div className="text-sm opacity-70">mUSDC locked in escrow</div>
+          </div>
+          <div className="bg-base-100 border border-base-300 px-8 py-4 text-center">
+            <div className="text-3xl font-bold">{connectedAddress ? myIds.size : "-"}</div>
+            <div className="text-sm opacity-70">Agreements you are part of</div>
+          </div>
+        </div>
+
         <div className="flex justify-center items-stretch gap-8 flex-col md:flex-row">
           {roles.map(role => (
             <div

@@ -1,19 +1,28 @@
 /* eslint-disable @typescript-eslint/no-deprecated */
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useParams } from "next/navigation";
 import { Address } from "@scaffold-ui/components";
 import type { NextPage } from "next";
 import { formatUnits, parseUnits } from "viem";
 import { useAccount } from "wagmi";
-import { useScaffoldEventHistory, useScaffoldReadContract, useScaffoldWriteContract } from "~~/hooks/scaffold-eth";
+import { SkipTime } from "~~/components/SkipTime";
+import {
+  useScaffoldEventHistory,
+  useScaffoldReadContract,
+  useScaffoldWriteContract,
+  useTargetNetwork,
+} from "~~/hooks/scaffold-eth";
+import { useChainNow } from "~~/hooks/useChainNow";
 import {
   AGREEMENT_STATUS,
+  ARBITER_TIMEOUT,
   FROM_BLOCK,
   MILESTONE_BADGE,
   MILESTONE_STATUS,
   duration,
+  explorerTxUrl,
   friendlyError,
   isSafeUrl,
 } from "~~/utils/escrow";
@@ -34,6 +43,7 @@ const ActivityLog = ({ id }: { id: bigint }) => {
 
   const accepted = useScaffoldEventHistory({ ...base, eventName: "AgreementAccepted" });
   const cancelled = useScaffoldEventHistory({ ...base, eventName: "AgreementCancelled" });
+  const declined = useScaffoldEventHistory({ ...base, eventName: "AgreementDeclined" });
   const completed = useScaffoldEventHistory({ ...base, eventName: "AgreementCompleted" });
   const submitted = useScaffoldEventHistory({ ...base, eventName: "MilestoneSubmitted" });
   const released = useScaffoldEventHistory({ ...base, eventName: "MilestoneReleased" });
@@ -49,6 +59,9 @@ const ActivityLog = ({ id }: { id: bigint }) => {
   accepted.data?.forEach(e => push(e, "Freelancer accepted the agreement"));
   cancelled.data?.forEach(e =>
     push(e, `Client cancelled and was refunded ${formatUnits(e.args.refunded ?? 0n, 6)} mUSDC`),
+  );
+  declined.data?.forEach(e =>
+    push(e, `Freelancer declined. Client refunded ${formatUnits(e.args.refunded ?? 0n, 6)} mUSDC`),
   );
   completed.data?.forEach(e => push(e, "Agreement completed"));
   submitted.data?.forEach(e => push(e, `Milestone ${Number(e.args.index) + 1} submitted`, e.args.note || undefined));
@@ -112,15 +125,11 @@ const AgreementDetail: NextPage = () => {
   const id = BigInt(/^\d+$/.test(idStr) ? idStr : "0");
 
   const { address } = useAccount();
+  const { targetNetwork } = useTargetNetwork();
   const me = (address ?? "").toLowerCase();
 
-  // 0 until the browser clock has been read, so nothing is computed from 1970
-  const [now, setNow] = useState(0);
-  useEffect(() => {
-    setNow(Math.floor(Date.now() / 1000));
-    const t = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
-    return () => clearInterval(t);
-  }, []);
+  // Chain time, 0 until it has been read
+  const now = useChainNow();
   const ready = now > 0;
 
   const [busy, setBusy] = useState(false);
@@ -165,12 +174,17 @@ const AgreementDetail: NextPage = () => {
 
   const active = Number(agreement.status) === 1;
   const created = Number(agreement.status) === 0;
+  const cancelled = Number(agreement.status) === 2;
   const reviewPeriod = Number(agreement.reviewPeriod);
+
+  const locked = cancelled ? 0n : milestones.reduce((sum, m) => (Number(m.status) <= 2 ? sum + m.amount : sum), 0n);
+  const settled = Number(agreement.settledCount);
 
   const statusLine = (m: (typeof milestones)[number]) => {
     const st = Number(m.status);
     const deadline = Number(m.deadline);
     const reviewEnds = Number(m.submittedAt) + reviewPeriod;
+    const arbiterEnds = Number(m.disputedAt) + ARBITER_TIMEOUT;
     if (st === 0) {
       if (!active) return "Waiting for the freelancer to accept the agreement.";
       return now > deadline
@@ -181,26 +195,57 @@ const AgreementDetail: NextPage = () => {
       return now <= reviewEnds
         ? `Client has ${duration(reviewEnds - now)} left to review.`
         : "Review period over. The freelancer can claim payment, or the client can still approve.";
-    if (st === 2) return "In dispute. Waiting for the arbiter to split the amount.";
+    if (st === 2)
+      return now <= arbiterEnds
+        ? `In dispute. The arbiter has ${duration(arbiterEnds - now)} left. After that, anyone can split it 50/50.`
+        : "The arbiter did not respond in time. Anyone can now split this milestone 50/50.";
     if (st === 3) return "Paid to the freelancer.";
     if (st === 4) return "Returned to the client.";
-    return "Settled by the arbiter.";
+    return "Settled.";
   };
 
   const tx = (functionName: string, args: unknown[], ok: string) =>
     run(async () => {
-      await writeContractAsync({ functionName, args } as any);
-      notification.success(ok);
+      const hash = (await writeContractAsync({ functionName, args } as any)) as string | undefined;
+      const url = explorerTxUrl(targetNetwork.id, hash);
+      notification.success(
+        url ? (
+          <span>
+            {ok}{" "}
+            <a href={url} target="_blank" rel="noopener noreferrer" className="link">
+              View on Etherscan
+            </a>
+          </span>
+        ) : (
+          ok
+        ),
+      );
     });
 
   return (
     <div className="flex items-center flex-col grow pt-10 pb-10">
       <div className="px-5 w-full max-w-4xl">
+        <SkipTime />
+
         <h1 className="text-center text-4xl font-bold mb-1">{agreement.title}</h1>
         <p className="text-center opacity-70 mt-0">
           Agreement #{idStr} · {AGREEMENT_STATUS[Number(agreement.status)]} · Total{" "}
           {formatUnits(agreement.totalAmount, 6)} mUSDC · Review period {duration(reviewPeriod)}
         </p>
+
+        <div className="mb-4">
+          <progress
+            className="progress progress-primary w-full"
+            value={settled}
+            max={milestones.length || 1}
+          ></progress>
+          <div className="flex justify-between text-sm opacity-80">
+            <span>
+              {settled} of {milestones.length} milestones settled
+            </span>
+            <span>{formatUnits(locked, 6)} mUSDC still locked in escrow</span>
+          </div>
+        </div>
 
         {error && (
           <div role="alert" className="alert alert-error mb-4">
@@ -228,17 +273,26 @@ const AgreementDetail: NextPage = () => {
             {isArbiter && <span className="badge badge-primary">You</span>}
           </div>
           {address && !isClient && !isFreelancer && !isArbiter && (
-            <p className="m-0 text-sm opacity-70">Your address has no role here, so this page is read-only.</p>
+            <p className="m-0 text-sm opacity-70">Your address has no role here, so you can only view this page.</p>
           )}
 
           {created && isFreelancer && (
-            <button
-              className="btn btn-primary mt-2 self-start"
-              disabled={busy}
-              onClick={() => tx("acceptAgreement", [id], "Agreement accepted")}
-            >
-              Accept agreement
-            </button>
+            <div className="flex gap-2 mt-2">
+              <button
+                className="btn btn-primary"
+                disabled={busy}
+                onClick={() => tx("acceptAgreement", [id], "Agreement accepted")}
+              >
+                Accept agreement
+              </button>
+              <button
+                className="btn btn-outline"
+                disabled={busy}
+                onClick={() => tx("declineAgreement", [id], "Agreement declined. The client was refunded.")}
+              >
+                Decline and refund client
+              </button>
+            </div>
           )}
           {created && isClient && (
             <button
@@ -259,6 +313,7 @@ const AgreementDetail: NextPage = () => {
             const reviewRunning = ready && st === 1 && now <= reviewEnds;
             const reviewOver = ready && st === 1 && now > reviewEnds;
             const deadlinePassed = ready && now > Number(m.deadline);
+            const arbiterTimedOut = ready && st === 2 && now > Number(m.disputedAt) + ARBITER_TIMEOUT;
 
             const noteOrReason = notes[i] ?? "";
             const split = splits[i] ?? "";
@@ -353,8 +408,8 @@ const AgreementDetail: NextPage = () => {
                   </button>
                 )}
 
-                {/* Arbiter: resolve */}
-                {isArbiter && st === 2 && (
+                {/* Arbiter: resolve (only while the arbiter's 7 days are running) */}
+                {isArbiter && st === 2 && ready && !arbiterTimedOut && (
                   <div className="flex flex-col gap-2">
                     <div className="flex gap-2 items-center flex-wrap">
                       <input
@@ -383,6 +438,17 @@ const AgreementDetail: NextPage = () => {
                       <span className="text-error text-sm">The share cannot exceed {formatUnits(m.amount, 6)}.</span>
                     )}
                   </div>
+                )}
+
+                {/* Anyone connected: 50/50 split after the arbiter's timeout */}
+                {address && arbiterTimedOut && (
+                  <button
+                    className="btn btn-warning self-start"
+                    disabled={busy}
+                    onClick={() => tx("resolveDisputeAfterTimeout", [id, BigInt(i)], "Split 50/50 and paid out")}
+                  >
+                    Split 50/50 (arbiter timed out)
+                  </button>
                 )}
               </div>
             );
