@@ -27,6 +27,8 @@ contract MilestoneEscrow is ReentrancyGuard {
     error ReviewPeriodNotOver();
     error DeadlineNotPassed();
     error AmountExceedsMilestone();
+    error ArbiterTimeoutNotReached();
+    error ArbiterTimeoutPassed();
 
     ///////////////
     /// Types /////
@@ -53,6 +55,7 @@ contract MilestoneEscrow is ReentrancyGuard {
         uint256 amount; // in token units (6 decimals for MockUSDC)
         uint64 deadline; // freelancer should submit by this time
         uint64 submittedAt; // 0 until submitted
+        uint64 disputedAt; // 0 until disputed
         MilestoneStatus status;
     }
 
@@ -80,6 +83,8 @@ contract MilestoneEscrow is ReentrancyGuard {
     uint256 public constant MAX_MILESTONES = 20;
     uint64 public constant MIN_REVIEW_PERIOD = 1 hours;
     uint64 public constant MAX_REVIEW_PERIOD = 30 days;
+    /// @notice How long the arbiter has to resolve a dispute before anyone can trigger a 50/50 split.
+    uint64 public constant ARBITER_TIMEOUT = 7 days;
 
     ///////////////
     /// Events ////
@@ -94,11 +99,13 @@ contract MilestoneEscrow is ReentrancyGuard {
     );
     event AgreementAccepted(uint256 indexed id);
     event AgreementCancelled(uint256 indexed id, uint256 refunded);
+    event AgreementDeclined(uint256 indexed id, uint256 refunded);
     event AgreementCompleted(uint256 indexed id);
     event MilestoneSubmitted(uint256 indexed id, uint256 indexed index, string note);
     event MilestoneReleased(uint256 indexed id, uint256 indexed index, uint256 amount, bool byTimeout);
     event MilestoneDisputed(uint256 indexed id, uint256 indexed index, string reason);
     event DisputeResolved(uint256 indexed id, uint256 indexed index, uint256 toFreelancer, uint256 toClient);
+    event DisputeTimedOut(uint256 indexed id, uint256 indexed index);
     event MilestoneRefunded(uint256 indexed id, uint256 indexed index, uint256 amount);
 
     constructor(IERC20 token_) {
@@ -149,6 +156,7 @@ contract MilestoneEscrow is ReentrancyGuard {
                     amount: amounts[i],
                     deadline: deadlines[i],
                     submittedAt: 0,
+                    disputedAt: 0,
                     status: MilestoneStatus.Pending
                 })
             );
@@ -179,6 +187,20 @@ contract MilestoneEscrow is ReentrancyGuard {
 
         a.status = AgreementStatus.Active;
         emit AgreementAccepted(id);
+    }
+
+    /// @notice Freelancer declines before accepting. The client is refunded in full.
+    /// @param id Agreement id
+    function declineAgreement(uint256 id) external nonReentrant {
+        Agreement storage a = agreements[id];
+        if (msg.sender != a.freelancer) revert NotFreelancer();
+        if (a.status != AgreementStatus.Created) revert WrongAgreementStatus();
+
+        a.status = AgreementStatus.Cancelled;
+        uint256 refund = a.totalAmount;
+
+        token.safeTransfer(a.client, refund);
+        emit AgreementDeclined(id, refund);
     }
 
     /// @notice Client cancels before acceptance and gets the full total back.
@@ -257,10 +279,13 @@ contract MilestoneEscrow is ReentrancyGuard {
         if (block.timestamp > uint256(m.submittedAt) + a.reviewPeriod) revert ReviewPeriodOver();
 
         m.status = MilestoneStatus.Disputed;
+        m.disputedAt = uint64(block.timestamp);
         emit MilestoneDisputed(id, index, reason);
     }
 
     /// @notice Arbiter splits a disputed milestone between the two sides.
+    /// @dev Only possible while block.timestamp <= disputedAt + ARBITER_TIMEOUT. After that,
+    ///      resolveDisputeAfterTimeout takes over, so the two paths never overlap.
     /// @param id Agreement id
     /// @param index Milestone index
     /// @param freelancerAmount Amount paid to the freelancer; the rest goes to the client
@@ -270,6 +295,7 @@ contract MilestoneEscrow is ReentrancyGuard {
 
         Milestone storage m = milestones[id][index];
         if (m.status != MilestoneStatus.Disputed) revert WrongMilestoneStatus();
+        if (block.timestamp > uint256(m.disputedAt) + ARBITER_TIMEOUT) revert ArbiterTimeoutPassed();
         if (freelancerAmount > m.amount) revert AmountExceedsMilestone();
 
         uint256 toClient = m.amount - freelancerAmount;
@@ -282,6 +308,30 @@ contract MilestoneEscrow is ReentrancyGuard {
         if (toClient > 0) token.safeTransfer(a.client, toClient);
 
         emit DisputeResolved(id, index, freelancerAmount, toClient);
+    }
+
+    /// @notice If the arbiter stays silent, anyone can split the disputed milestone 50/50.
+    /// @dev Requires block.timestamp > disputedAt + ARBITER_TIMEOUT. An odd leftover unit goes to the client.
+    /// @param id Agreement id
+    /// @param index Milestone index
+    function resolveDisputeAfterTimeout(uint256 id, uint256 index) external nonReentrant {
+        Agreement storage a = agreements[id];
+        Milestone storage m = milestones[id][index];
+        if (m.status != MilestoneStatus.Disputed) revert WrongMilestoneStatus();
+        if (block.timestamp <= uint256(m.disputedAt) + ARBITER_TIMEOUT) revert ArbiterTimeoutNotReached();
+
+        uint256 toFreelancer = m.amount / 2;
+        uint256 toClient = m.amount - toFreelancer;
+
+        // Effects before interactions
+        m.status = MilestoneStatus.Resolved;
+        _settle(id);
+
+        if (toFreelancer > 0) token.safeTransfer(a.freelancer, toFreelancer);
+        if (toClient > 0) token.safeTransfer(a.client, toClient);
+
+        emit DisputeResolved(id, index, toFreelancer, toClient);
+        emit DisputeTimedOut(id, index);
     }
 
     /// @notice Client reclaims a milestone the freelancer never submitted by its deadline.
