@@ -7,7 +7,7 @@ import { GenericContractsDeclaration } from "~~/utils/scaffold-eth/contract";
 const deployedContracts = {
   31337: {
     MilestoneEscrow: {
-      address: "0x9fe46736679d2d9a65f0992f2272de9f3c7fa6e0",
+      address: "0xe7f1725e7734ce288f8367e1bb143e90bb3f0512",
       abi: [
         {
           inputs: [
@@ -687,10 +687,10 @@ const deployedContracts = {
         },
       ],
       inheritedFunctions: {},
-      deployedOnBlock: 3,
+      deployedOnBlock: 2,
     },
     MockUSDC: {
-      address: "0xe7f1725e7734ce288f8367e1bb143e90bb3f0512",
+      address: "0x5fbdb2315678afecb367f032d93f642f64180aa3",
       abi: [
         {
           inputs: [],
@@ -1053,7 +1053,7 @@ const deployedContracts = {
         transfer: "npm/@openzeppelin/contracts@5.7.0/token/ERC20/ERC20.sol",
         transferFrom: "npm/@openzeppelin/contracts@5.7.0/token/ERC20/ERC20.sol",
       },
-      deployedOnBlock: 2,
+      deployedOnBlock: 1,
     },
   },
 } as const;
