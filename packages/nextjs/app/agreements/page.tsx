@@ -8,13 +8,9 @@ import type { NextPage } from "next";
 import { formatUnits } from "viem";
 import { useAccount } from "wagmi";
 import { useScaffoldEventHistory, useScaffoldReadContract } from "~~/hooks/scaffold-eth";
+import { AGREEMENT_STATUS, FROM_BLOCK } from "~~/utils/escrow";
 
 type Tab = "client" | "freelancer" | "arbiter";
-
-const AGREEMENT_STATUS = ["Created", "Active", "Cancelled", "Completed"];
-
-// Start of the event search. Use 0n locally; before Sepolia, set this to the deployment block.
-const FROM_BLOCK = 0n;
 
 const AgreementRow = ({
   id,

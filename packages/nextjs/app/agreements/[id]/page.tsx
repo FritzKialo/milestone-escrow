@@ -8,23 +8,25 @@ import type { NextPage } from "next";
 import { formatUnits, parseUnits } from "viem";
 import { useAccount } from "wagmi";
 import { useScaffoldEventHistory, useScaffoldReadContract, useScaffoldWriteContract } from "~~/hooks/scaffold-eth";
+import {
+  AGREEMENT_STATUS,
+  FROM_BLOCK,
+  MILESTONE_BADGE,
+  MILESTONE_STATUS,
+  duration,
+  friendlyError,
+  isSafeUrl,
+} from "~~/utils/escrow";
 import { notification } from "~~/utils/scaffold-eth";
 
-const FROM_BLOCK = 0n;
-const AGREEMENT_STATUS = ["Created", "Active", "Cancelled", "Completed"];
-const MILESTONE_STATUS = ["Pending", "Submitted", "Disputed", "Released", "Refunded", "Resolved"];
-const BADGE = ["badge-warning", "badge-info", "badge-error", "badge-success", "badge-neutral", "badge-secondary"];
-
-// Seconds -> "2 days 4 hours"
-const duration = (secs: number) => {
-  const s = Math.max(0, Math.floor(secs));
-  const d = Math.floor(s / 86400);
-  const h = Math.floor((s % 86400) / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  if (d > 0) return `${d} day${d === 1 ? "" : "s"} ${h} hour${h === 1 ? "" : "s"}`;
-  if (h > 0) return `${h} hour${h === 1 ? "" : "s"} ${m} min`;
-  if (m > 0) return `${m} min`;
-  return `${s} sec`;
+// "12.5" -> 12500000n, or null when empty or not a valid number
+const parseAmount = (value: string): bigint | null => {
+  if (value.trim() === "") return null;
+  try {
+    return parseUnits(value.trim(), 6);
+  } catch {
+    return null;
+  }
 };
 
 const ActivityLog = ({ id }: { id: bigint }) => {
@@ -39,19 +41,17 @@ const ActivityLog = ({ id }: { id: bigint }) => {
   const resolved = useScaffoldEventHistory({ ...base, eventName: "DisputeResolved" });
   const refunded = useScaffoldEventHistory({ ...base, eventName: "MilestoneRefunded" });
 
-  type Entry = { block: number; log: number; text: string };
+  type Entry = { block: number; log: number; text: string; note?: string };
   const entries: Entry[] = [];
-  const push = (e: { blockNumber?: bigint | null; logIndex?: number | null }, text: string) =>
-    entries.push({ block: Number(e.blockNumber ?? 0), log: Number(e.logIndex ?? 0), text });
+  const push = (e: { blockNumber?: bigint | null; logIndex?: number | null }, text: string, note?: string) =>
+    entries.push({ block: Number(e.blockNumber ?? 0), log: Number(e.logIndex ?? 0), text, note });
 
   accepted.data?.forEach(e => push(e, "Freelancer accepted the agreement"));
   cancelled.data?.forEach(e =>
     push(e, `Client cancelled and was refunded ${formatUnits(e.args.refunded ?? 0n, 6)} mUSDC`),
   );
   completed.data?.forEach(e => push(e, "Agreement completed"));
-  submitted.data?.forEach(e =>
-    push(e, `Milestone ${Number(e.args.index) + 1} submitted${e.args.note ? `: ${e.args.note}` : ""}`),
-  );
+  submitted.data?.forEach(e => push(e, `Milestone ${Number(e.args.index) + 1} submitted`, e.args.note || undefined));
   released.data?.forEach(e =>
     push(
       e,
@@ -60,9 +60,7 @@ const ActivityLog = ({ id }: { id: bigint }) => {
       }`,
     ),
   );
-  disputed.data?.forEach(e =>
-    push(e, `Milestone ${Number(e.args.index) + 1} disputed${e.args.reason ? `: ${e.args.reason}` : ""}`),
-  );
+  disputed.data?.forEach(e => push(e, `Milestone ${Number(e.args.index) + 1} disputed`, e.args.reason || undefined));
   resolved.data?.forEach(e =>
     push(
       e,
@@ -86,7 +84,21 @@ const ActivityLog = ({ id }: { id: bigint }) => {
       ) : (
         <ul className="m-0 pl-5">
           {entries.map((e, i) => (
-            <li key={i}>{e.text}</li>
+            <li key={i}>
+              {e.text}
+              {e.note && (
+                <>
+                  :{" "}
+                  {isSafeUrl(e.note) ? (
+                    <a href={e.note} target="_blank" rel="noopener noreferrer" className="link break-all">
+                      {e.note}
+                    </a>
+                  ) : (
+                    <span className="break-all">{e.note}</span>
+                  )}
+                </>
+              )}
+            </li>
           ))}
         </ul>
       )}
@@ -102,14 +114,17 @@ const AgreementDetail: NextPage = () => {
   const { address } = useAccount();
   const me = (address ?? "").toLowerCase();
 
+  // 0 until the browser clock has been read, so nothing is computed from 1970
   const [now, setNow] = useState(0);
   useEffect(() => {
     setNow(Math.floor(Date.now() / 1000));
     const t = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
     return () => clearInterval(t);
   }, []);
+  const ready = now > 0;
 
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
   const [notes, setNotes] = useState<Record<number, string>>({});
   const [splits, setSplits] = useState<Record<number, string>>({});
 
@@ -132,11 +147,13 @@ const AgreementDetail: NextPage = () => {
 
   const run = async (fn: () => Promise<unknown>) => {
     setBusy(true);
+    setError("");
     try {
       await fn();
       await Promise.all([refetchAgreement(), refetchMilestones()]);
     } catch (e) {
       console.error(e);
+      setError(friendlyError(e));
     } finally {
       setBusy(false);
     }
@@ -185,6 +202,15 @@ const AgreementDetail: NextPage = () => {
           {formatUnits(agreement.totalAmount, 6)} mUSDC · Review period {duration(reviewPeriod)}
         </p>
 
+        {error && (
+          <div role="alert" className="alert alert-error mb-4">
+            <span>{error}</span>
+          </div>
+        )}
+        {busy && (
+          <p className="text-sm opacity-70 mt-0">Waiting for your wallet and for the transaction to be mined...</p>
+        )}
+
         <div className="bg-base-100 border border-base-300 p-6 flex flex-col gap-2">
           <div className="flex items-center gap-2">
             <span className="w-24 font-medium">Client</span>
@@ -230,16 +256,16 @@ const AgreementDetail: NextPage = () => {
           {milestones.map((m, i) => {
             const st = Number(m.status);
             const reviewEnds = Number(m.submittedAt) + reviewPeriod;
-            const reviewRunning = st === 1 && now <= reviewEnds;
-            const reviewOver = st === 1 && now > reviewEnds;
+            const reviewRunning = ready && st === 1 && now <= reviewEnds;
+            const reviewOver = ready && st === 1 && now > reviewEnds;
+            const deadlinePassed = ready && now > Number(m.deadline);
+
+            const noteOrReason = notes[i] ?? "";
             const split = splits[i] ?? "";
-            let splitUnits = 0n;
-            try {
-              splitUnits = split.trim() === "" ? 0n : parseUnits(split, 6);
-            } catch {
-              splitUnits = 0n;
-            }
-            const splitInvalid = splitUnits > m.amount;
+            const parsedSplit = parseAmount(split);
+            const splitUnits = parsedSplit ?? 0n;
+            const splitNotNumber = split.trim() !== "" && parsedSplit === null;
+            const splitTooBig = splitUnits > m.amount;
 
             return (
               <div key={i} className="bg-base-100 border border-base-300 p-5 flex flex-col gap-2">
@@ -249,24 +275,24 @@ const AgreementDetail: NextPage = () => {
                   </span>
                   <span className="flex items-center gap-3">
                     <span>{formatUnits(m.amount, 6)} mUSDC</span>
-                    <span className={`badge ${BADGE[st]}`}>{MILESTONE_STATUS[st]}</span>
+                    <span className={`badge ${MILESTONE_BADGE[st]}`}>{MILESTONE_STATUS[st]}</span>
                   </span>
                 </div>
-                <p className="m-0 text-sm opacity-80">{statusLine(m)}</p>
+                {ready && <p className="m-0 text-sm opacity-80">{statusLine(m)}</p>}
 
                 {/* Freelancer: submit */}
                 {isFreelancer && active && st === 0 && (
                   <div className="flex gap-2 flex-wrap">
                     <input
                       className="input input-bordered grow"
-                      placeholder="Link or note about the work"
-                      value={notes[i] ?? ""}
+                      placeholder="Link to the work (https://...)"
+                      value={noteOrReason}
                       onChange={e => setNotes({ ...notes, [i]: e.target.value })}
                     />
                     <button
                       className="btn btn-primary"
                       disabled={busy}
-                      onClick={() => tx("submitMilestone", [id, BigInt(i), notes[i] ?? ""], "Milestone submitted")}
+                      onClick={() => tx("submitMilestone", [id, BigInt(i), noteOrReason.trim()], "Milestone submitted")}
                     >
                       Submit
                     </button>
@@ -288,13 +314,15 @@ const AgreementDetail: NextPage = () => {
                         <input
                           className="input input-bordered grow"
                           placeholder="Reason for the dispute"
-                          value={notes[i] ?? ""}
+                          value={noteOrReason}
                           onChange={e => setNotes({ ...notes, [i]: e.target.value })}
                         />
                         <button
                           className="btn btn-error"
-                          disabled={busy}
-                          onClick={() => tx("disputeMilestone", [id, BigInt(i), notes[i] ?? ""], "Milestone disputed")}
+                          disabled={busy || noteOrReason.trim() === ""}
+                          onClick={() =>
+                            tx("disputeMilestone", [id, BigInt(i), noteOrReason.trim()], "Milestone disputed")
+                          }
                         >
                           Dispute
                         </button>
@@ -315,7 +343,7 @@ const AgreementDetail: NextPage = () => {
                 )}
 
                 {/* Client: refund after missed deadline */}
-                {isClient && active && st === 0 && now > Number(m.deadline) && (
+                {isClient && active && st === 0 && deadlinePassed && (
                   <button
                     className="btn btn-outline self-start"
                     disabled={busy}
@@ -337,17 +365,21 @@ const AgreementDetail: NextPage = () => {
                         onChange={e => setSplits({ ...splits, [i]: e.target.value })}
                       />
                       <span className="text-sm">
-                        Client&apos;s share: {splitInvalid ? "n/a" : formatUnits(m.amount - splitUnits, 6)} mUSDC
+                        Client&apos;s share:{" "}
+                        {parsedSplit === null || splitTooBig ? "n/a" : formatUnits(m.amount - splitUnits, 6)} mUSDC
                       </span>
                       <button
                         className="btn btn-primary"
-                        disabled={busy || splitInvalid || split.trim() === ""}
+                        disabled={busy || parsedSplit === null || splitTooBig}
                         onClick={() => tx("resolveDispute", [id, BigInt(i), splitUnits], "Dispute resolved")}
                       >
                         Resolve
                       </button>
                     </div>
-                    {splitInvalid && (
+                    {splitNotNumber && (
+                      <span className="text-error text-sm">Enter a number, for example 30 or 12.5.</span>
+                    )}
+                    {splitTooBig && (
                       <span className="text-error text-sm">The share cannot exceed {formatUnits(m.amount, 6)}.</span>
                     )}
                   </div>
