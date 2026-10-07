@@ -1,83 +1,156 @@
-# 🏗 Scaffold-ETH 2
+# Milestone Escrow
 
-<h4 align="center">
-  <a href="https://docs.scaffoldeth.io">Documentation</a> |
-  <a href="https://scaffoldeth.io">Website</a>
-</h4>
+A smart contract that holds a client's payment and releases it to a freelancer **one milestone at a time**, so neither side has to trust the other.
 
-🧪 An open-source, up-to-date toolkit for building decentralized applications (dapps) on the Ethereum blockchain. It's designed to make it easier for developers to create and deploy smart contracts and build user interfaces that interact with those contracts.
+A client fears paying upfront for work that never arrives. A freelancer fears delivering work that never gets paid. The money is locked before work starts, and it only moves when a milestone is approved, times out, or is settled by an arbiter both sides accepted.
 
-> [!NOTE]
-> 🤖 Scaffold-ETH 2 is AI-ready! It has everything agents need to build on Ethereum. Check `.agents/`, `.claude/`, `.opencode` or `.cursor/` for more info.
+> **Testnet only.** The contract is unaudited and must not hold real money.
 
-⚙️ Built using NextJS, RainbowKit, Hardhat, Wagmi, Viem, and Typescript.
+- **Live app:** https://milestone-escrow-five.vercel.app
+- **Network:** Sepolia
+- **Demo video:** _add link here_
+- **Example completed agreement:** _add an Etherscan transaction link here_
 
-- ✅ **Contract Hot Reload**: Your frontend auto-adapts to your smart contract as you edit it.
-- 🪝 **[Custom hooks](https://docs.scaffoldeth.io/hooks/)**: Collection of React hooks wrapper around [wagmi](https://wagmi.sh/) to simplify interactions with smart contracts with typescript autocompletion.
-- 🧱 [**Components**](https://docs.scaffoldeth.io/components/): Collection of common web3 components to quickly build your frontend.
-- 🔥 **Burner Wallet & Local Faucet**: Quickly test your application with a burner wallet and local faucet.
-- 🔐 **Integration with Wallet Providers**: Connect to different wallet providers and interact with the Ethereum network.
+## Deployed contracts (Sepolia)
 
-![Debug Contracts tab](https://github.com/scaffold-eth/scaffold-eth-2/assets/55535804/b237af0c-5027-4849-a5c1-2e31495cccb1)
+| Contract | Address | Source |
+| --- | --- | --- |
+| MilestoneEscrow | [`0xe1a42bb85a64ef48cf644a6dea72ef25e188c7d9`](https://sepolia.etherscan.io/address/0xe1a42bb85a64ef48cf644a6dea72ef25e188c7d9#code) | Verified |
+| MockUSDC (test token, 6 decimals) | [`0xa3cb1354c107a1cd4352ace0b63cfc69e9d6b35b`](https://sepolia.etherscan.io/address/0xa3cb1354c107a1cd4352ace0b63cfc69e9d6b35b#code) | Verified |
 
-## Requirements
+Escrow deployment block: `11834415`.
 
-Before you begin, you need to install the following tools:
+## How it works
 
-- [Node (>= v20.18.3)](https://nodejs.org/en/download/)
-- Yarn ([v1](https://classic.yarnpkg.com/en/docs/install/) or [v2+](https://yarnpkg.com/getting-started/install))
-- [Git](https://git-scm.com/downloads)
+Three wallets take part in every agreement, and each can call only its own functions.
 
-## Quickstart
+| Role | How it is set | What it can do |
+| --- | --- | --- |
+| Client | Whoever creates the agreement | Create and fund, cancel before acceptance, approve, dispute, refund after a missed deadline |
+| Freelancer | Named by the client | Accept or decline the agreement, submit a milestone, claim after the review period |
+| Arbiter | Named by the client, confirmed when the freelancer accepts | Resolve a disputed milestone |
 
-To get started with Scaffold-ETH 2, follow the steps below:
+The acceptance step protects the freelancer. Without it, a client could name a second wallet of their own as arbiter, dispute every milestone and refund themselves. If the freelancer does not want the terms, they can decline and the client is refunded in full.
 
-1. Install dependencies if it was skipped in CLI:
+### Agreement lifecycle
 
+```mermaid
+stateDiagram-v2
+    [*] --> Created: client creates and funds
+    Created --> Active: freelancer accepts
+    Created --> Cancelled: client cancels or freelancer declines (full refund)
+    Active --> Completed: every milestone is final
 ```
-cd my-dapp-example
+
+### Milestone lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending: funds locked
+    Pending --> Submitted: freelancer submits
+    Pending --> Refunded: deadline missed, client refunds
+    Submitted --> Released: client approves, or freelancer claims after the review period
+    Submitted --> Disputed: client disputes within the review period
+    Disputed --> Resolved: arbiter splits, or anyone splits 50/50 after 7 days
+```
+
+Released, Refunded and Resolved are final: the funds for that milestone have left the contract.
+
+Two clocks drive a milestone: its own deadline for the freelancer to submit, and the agreement's review period for the client to respond after a submission.
+
+### Functions
+
+| Function | Caller | Allowed when | Effect |
+| --- | --- | --- | --- |
+| `createAgreement` | Anyone (becomes the client) | Inputs valid, allowance covers the total | Pulls the total into escrow |
+| `acceptAgreement` | Freelancer | Created | Active |
+| `declineAgreement` | Freelancer | Created | Refunds the client, Cancelled |
+| `cancelAgreement` | Client | Created | Refunds the client, Cancelled |
+| `submitMilestone` | Freelancer | Active, milestone Pending | Submitted |
+| `approveMilestone` | Client | Submitted | Pays the freelancer |
+| `claimAfterTimeout` | Freelancer | Submitted, review period over | Pays the freelancer |
+| `disputeMilestone` | Client | Submitted, review period not over | Disputed |
+| `resolveDispute` | Arbiter | Disputed, within 7 days | Splits the amount as the arbiter decides |
+| `resolveDisputeAfterTimeout` | Anyone | Disputed, more than 7 days | Splits 50/50 (an odd unit goes to the client) |
+| `refundMilestone` | Client | Active, milestone Pending, deadline passed | Refunds the client |
+
+Boundaries are exact. The client may dispute while `block.timestamp <= submittedAt + reviewPeriod`, and the freelancer may claim only when `block.timestamp > submittedAt + reviewPeriod`, so the two never overlap. The arbiter and the 50/50 timeout work the same way around `disputedAt + 7 days`.
+
+## Design decisions
+
+- **Checks, effects, interactions.** Every paying function sets the milestone status and updates the settled count before moving any tokens.
+- **Reentrancy guard and safe transfers.** Every function that moves tokens is `nonReentrant` and uses OpenZeppelin `SafeERC20`.
+- **No admin.** There is no owner, pause or rescue function. Tokens leave only through the lifecycle paths.
+- **One token, fixed at deployment.** This keeps fee-on-transfer and rebasing tokens out, which would break the accounting.
+- **Exact splits.** The arbiter's amount is checked against the milestone amount first, the client's share is computed by subtraction, and zero-value transfers are skipped.
+- **Events carry the free text.** `note` and `reason` are emitted in events only, not stored, which keeps gas low.
+- **Custom errors** instead of revert strings.
+- **Balance invariant.** The escrow's token balance always equals the sum of milestone amounts that are not yet final, across agreements that are not cancelled. The tests assert this after every step of a long mixed scenario.
+- **Late submission is allowed** after a deadline, until the client refunds that milestone. A refunded milestone can never be submitted.
+- **Arbiter timeout.** A silent arbiter cannot lock funds forever. After 7 days anyone can split the disputed milestone 50/50.
+
+## Run it locally
+
+Requirements: Node 22 or later, Yarn (via Corepack) and Git.
+
+```bash
+git clone https://github.com/FritzKialo/milestone-escrow.git
+cd milestone-escrow
 yarn install
 ```
 
-2. Run a local network in the first terminal:
+In three terminals:
 
-```
-yarn chain
-```
-
-This command starts a local Ethereum network using Hardhat. The network runs on your local machine and can be used for testing and development. You can customize the network configuration in `packages/hardhat/hardhat.config.ts`.
-
-3. On a second terminal, deploy the test contract:
-
-```
-yarn deploy
+```bash
+yarn chain     # local blockchain
+yarn deploy    # deploys MockUSDC and MilestoneEscrow
+yarn start     # frontend at http://localhost:3000
 ```
 
-This command deploys a test smart contract to the local network. The contract is located in `packages/hardhat/contracts` and can be modified to suit your needs. The `yarn deploy` command uses the deploy script located in `packages/hardhat/deploy` to deploy the contract to the network. You can also customize the deploy script.
+On the local chain, the app shows a **skip chain time** bar on the agreement page. It lets you demonstrate the timeout claim, the missed-deadline refund and the arbiter timeout without waiting. The bar never appears on any other network.
 
-4. On a third terminal, start your NextJS app:
+To try all three roles locally, use three different wallets: for example your main browser window plus a private window in two other browsers, each of which gets its own burner wallet. Fund each from the Faucet button.
 
+## Tests
+
+```bash
+yarn test
 ```
-yarn start
-```
 
-Visit your app on: `http://localhost:3000`. You can interact with your smart contract using the `Debug Contracts` page. You can tweak the app config in `packages/nextjs/scaffold.config.ts`.
+61 tests cover every path in the diagrams, every wrong-caller case, the exact boundary seconds, double-settlement attempts, two agreements side by side, events, and the balance invariant.
 
-Run smart contract test with `yarn hardhat:test`
+## Frontend
 
-- Edit your smart contracts in `packages/hardhat/contracts`
-- Edit your frontend homepage at `packages/nextjs/app/page.tsx`. For guidance on [routing](https://nextjs.org/docs/app/building-your-application/routing/defining-routes) and configuring [pages/layouts](https://nextjs.org/docs/app/building-your-application/routing/pages-and-layouts) checkout the Next.js documentation.
-- Edit your deployment scripts in `packages/hardhat/deploy`
+| Page | Route | What it does |
+| --- | --- | --- |
+| Home | `/` | Explanation, roles, live stats, test mUSDC faucet |
+| Create | `/create` | Milestone form with quick splits and a two-step Approve then Create flow |
+| My agreements | `/agreements` | Tabs for client, freelancer and arbiter, with "needs your action" markers and progress |
+| Agreement detail | `/agreements/[id]` | Parties, milestone badges and countdowns, role-based buttons, activity log |
 
+Each wallet sees only the actions its role allows. A wallet with no role sees the agreement read-only.
 
-## Documentation
+## Known limitations
 
-Visit our [docs](https://docs.scaffoldeth.io) to learn how to start building with Scaffold-ETH 2.
+- **The arbiter is fully trusted** for the disputed amount and could side with either party. The timeout only protects against silence, not against a biased arbiter.
+- **Payouts are pushed** to the recipient. With a token that can block addresses, a blocked recipient would make that payout revert. A withdraw-your-balance design avoids this.
+- **Block timestamps can be shifted by a few seconds**, which is why the minimum review period is one hour.
+- **Event history uses `getLogs`**, which the template marks as suitable for development and small deployments. An indexer would be needed at scale.
+- **The review period cannot be demonstrated on Sepolia** in a short session, because the minimum is one hour. Use the local chain.
+- **Unaudited. Testnet only.**
 
-To know more about its features, check out our [website](https://scaffoldeth.io).
+## Roadmap
 
-## Contributing to Scaffold-ETH 2
+1. **Payments:** pull payments, optional arbiter fees, real USDC and several approved tokens, editable milestones by mutual agreement.
+2. **Infrastructure:** an indexer for event history, then a professional audit.
+3. **Launch:** deployment on a low-fee L2 after the audit.
+4. **Arbitration:** panels of several arbiters, or integration with an existing dispute system.
+5. **Product:** on-chain reputation for completed agreements, notifications when action is needed, saved agreement templates, gasless flows through account abstraction, and local fiat on and off ramps.
 
-We welcome contributions to Scaffold-ETH 2!
+## Stack
 
-Please see [CONTRIBUTING.MD](https://github.com/scaffold-eth/scaffold-eth-2/blob/main/CONTRIBUTING.md) for more information and guidelines for contributing to Scaffold-ETH 2.
+Scaffold-ETH 2 (Hardhat), Solidity ^0.8.20, OpenZeppelin Contracts 5, Next.js, deployed on Sepolia and Vercel.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
