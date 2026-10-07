@@ -1,6 +1,6 @@
 // First block to search for events. Use 0n locally.
 // Before Sepolia, set this to the block your MilestoneEscrow was deployed in.
-export const FROM_BLOCK = 0n;
+export const FROM_BLOCK = 11834415n;
 
 // Must match ARBITER_TIMEOUT in MilestoneEscrow.sol (7 days)
 export const ARBITER_TIMEOUT = 7 * 24 * 60 * 60;
